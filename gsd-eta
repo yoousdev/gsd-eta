@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# gsd-eta — gemessene Subagent-Laufzeiten (p50/p90) aus der OpenCode-DB,
-# statt der hardcodierten GSD-Schätzung „~1–5 min". Nur-Lesend via immutable=1,
-# kein gsd-core-Patch (überlebt /gsd-update).
-# Quellen: session_v2 (lebend, seit 12.10.2026) + session (Archiv davor),
-# UNION ALL. Pro Agent: letzte 30 Tage, wenn ≥ 10 Runs dort, sonst All-time —
-# die Werte verbessern sich kontinuierlich mit jedem neuen Run und vergesssen
-# alte Modell-Ären. Runs < 30 s = Crash-Stubs → gefiltert, Cap 3 h.
+# gsd-eta — measured p50/p90 subagent runtimes from the OpenCode database,
+# replacing the hardcoded "~1–5 min" GSD spawn estimate.
+# Read-only access via immutable=1 (no lock, no copy of the DB).
 set -euo pipefail
 DB="file:$HOME/.local/share/opencode/opencode.db?immutable=1"
 CUTOFF=$(( $(date +%s) * 1000 - 30 * 86400000 ))
 
-# -s = fertige Spawn-Zeile mit aktueller Zeit + erwarteter Rückkehr (p90)
+# -s prints a ready-made spawn line incl. current time and expected return (p90)
 spawn=0
 case "${1:-}" in
   -s|--spawn) spawn=1; shift ;;
 esac
 
-# Workflow-Kurznamen → voller Agent-Name
+# short aliases → canonical agent names
 case "${1:-}" in
   "")         want="" ;;
   researcher) want=gsd-phase-researcher ;;
@@ -28,6 +24,8 @@ case "${1:-}" in
   *)          want=$1 ;;
 esac
 
+# session_v2 (live) UNION ALL session (archive); < 30 s runs are crash stubs;
+# outliers capped at 3 h; recency flag for the per-agent 30-day window
 rows=$(sqlite3 -separator ' ' "$DB" "
   SELECT agent, MIN(time_updated - time_created, 10800000),
          CASE WHEN time_created >= $CUTOFF THEN 1 ELSE 0 END
@@ -38,38 +36,38 @@ rows=$(sqlite3 -separator ' ' "$DB" "
   )
   WHERE parent_id IS NOT NULL AND agent IS NOT NULL
     AND time_updated - time_created >= 30000;" 2>/dev/null) || {
-  echo "gsd-eta: OpenCode-DB nicht erreichbar — hardcoded ETA behalten" >&2
+  echo "gsd-eta: OpenCode DB unreachable — keep the hardcoded ETA" >&2
   exit 1
 }
-[ -n "$rows" ] || { echo "gsd-eta: keine Subagent-Runs in der DB" >&2; exit 1; }
+[ -n "$rows" ] || { echo "gsd-eta: no subagent runs in the DB" >&2; exit 1; }
 
 out=$(echo "$rows" | awk -v want="$want" -v spawn="$spawn" '
   { v[$1][$3][++n[$1][$3]] = $2 }
   END {
     if (want != "" && want !~ /^gsd-/ && n["gsd-" want][0] + n["gsd-" want][1] > 0) {
-      want = "gsd-" want   # verifier → gsd-verifier
+      want = "gsd-" want   # bare name → canonical gsd-* name
     }
     if (want != "" && n[want][0] + n[want][1] == 0) {
-      print "gsd-eta: keine Runs für " want > "/dev/stderr"; exit 1
+      print "gsd-eta: no runs for " want > "/dev/stderr"; exit 1
     }
     PROCINFO["sorted_in"] = "@ind_str_asc"
     for (a in n) {
       if (want != "" && a != want) continue
       if (want == "" && a !~ /^gsd-/) continue
-      w = (n[a][1] >= 10) ? 1 : 0   # 30-Tage-Fenster, wenn genug frische Runs
+      w = (n[a][1] >= 10) ? 1 : 0   # use the 30-day window when enough recent runs
       m = asort(v[a][w])
       if (m == 0) continue
-      p50 = v[a][w][int((m + 1) / 2)]          # nearest-rank
+      p50 = v[a][w][int((m + 1) / 2)]          # nearest-rank percentile
       p90 = v[a][w][int((9 * m + 9) / 10)]
       if (spawn) { printf "%d %d\n", p50/60000, p90/60000; exit }
       printf "%-25s p50 %3d min, p90 %3d min (n=%d, %s)\n", a ":", \
-        p50/60000, p90/60000, m, (w ? "30d" : "alle")
+        p50/60000, p90/60000, m, (w ? "30d" : "all")
     }
-  }') || { echo "gsd-eta: keine Messwerte" >&2; exit 1; }
+  }') || { echo "gsd-eta: no measurements" >&2; exit 1; }
 
 if [ "$spawn" = 1 ]; then
   read -r p50 p90 <<< "$out"
-  printf 'Spawning %s... (läuft in einem Subagenten — keine Ausgabe, bis er zurückkehrt; Start %s Uhr, gemessen p50 %d min / p90 %d min → zurück erwartet ca. %s Uhr; erwartbar, kein Einfrieren)\n' \
+  printf 'Spawning %s... (runs in a subagent — no output until it returns; started %s, measured p50 %d min / p90 %d min → expected back around %s; expected, not a freeze)\n' \
     "${want#gsd-}" "$(date +%H:%M)" "$p50" "$p90" "$(date -d "+$p90 min" +%H:%M)"
 else
   printf '%s\n' "$out"
