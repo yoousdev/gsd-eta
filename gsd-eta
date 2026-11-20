@@ -26,9 +26,11 @@ esac
 # session_v2 (live) UNION ALL session (archive); < 30 s runs are crash stubs;
 # outliers capped at 3 h; recency flag for the per-agent 30-day window
 # shortcut: uses python3's sqlite3 module — the sqlite3 CLI is not installed on this host
+# mode=ro (NOT immutable=1): the live WAL db races under immutable reads (intermittent
+# "malformed"/missing-schema errors while opencode writes)
 rows=$(python3 -c "
 import sqlite3
-db = sqlite3.connect('file:$HOME/.local/share/opencode/opencode.db?immutable=1', uri=True)
+db = sqlite3.connect('file:$HOME/.local/share/opencode/opencode.db?mode=ro', uri=True)
 q = '''SELECT agent, MIN(time_updated - time_created, 10800000),
        CASE WHEN time_created >= $CUTOFF THEN 1 ELSE 0 END
   FROM (SELECT agent, parent_id, time_created, time_updated FROM session_v2
