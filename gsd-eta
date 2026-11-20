@@ -3,7 +3,6 @@
 # replacing the hardcoded "~1–5 min" GSD spawn estimate.
 # Read-only access via immutable=1 (no lock, no copy of the DB).
 set -euo pipefail
-DB="file:$HOME/.local/share/opencode/opencode.db?immutable=1"
 CUTOFF=$(( $(date +%s) * 1000 - 30 * 86400000 ))
 
 # -s prints a ready-made spawn line incl. current time and expected return (p90)
@@ -26,16 +25,19 @@ esac
 
 # session_v2 (live) UNION ALL session (archive); < 30 s runs are crash stubs;
 # outliers capped at 3 h; recency flag for the per-agent 30-day window
-rows=$(sqlite3 -separator ' ' "$DB" "
-  SELECT agent, MIN(time_updated - time_created, 10800000),
-         CASE WHEN time_created >= $CUTOFF THEN 1 ELSE 0 END
-  FROM (
-    SELECT agent, parent_id, time_created, time_updated FROM session_v2
-    UNION ALL
-    SELECT agent, parent_id, time_created, time_updated FROM session
-  )
+# shortcut: uses python3's sqlite3 module — the sqlite3 CLI is not installed on this host
+rows=$(python3 -c "
+import sqlite3
+db = sqlite3.connect('file:$HOME/.local/share/opencode/opencode.db?immutable=1', uri=True)
+q = '''SELECT agent, MIN(time_updated - time_created, 10800000),
+       CASE WHEN time_created >= $CUTOFF THEN 1 ELSE 0 END
+  FROM (SELECT agent, parent_id, time_created, time_updated FROM session_v2
+        UNION ALL
+        SELECT agent, parent_id, time_created, time_updated FROM session)
   WHERE parent_id IS NOT NULL AND agent IS NOT NULL
-    AND time_updated - time_created >= 30000;" 2>/dev/null) || {
+    AND time_updated - time_created >= 30000'''
+for r in db.execute(q): print(*r)
+" 2>/dev/null) || {
   echo "gsd-eta: OpenCode DB unreachable — keep the hardcoded ETA" >&2
   exit 1
 }
